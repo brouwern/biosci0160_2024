@@ -1,0 +1,312 @@
+---
+title: "Code Sample - Nathan Brouwer, Phd"
+output:
+  word_document: default
+  html_document: default
+date: "2024-01-22"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = FALSE)
+```
+
+
+
+
+## PART 3: DATA BASE 2 query and processing (NCBI Gene)
+
+Unlike UniProt, data in the NCBI gene database is not stored in tabular format and must be extracted from a HUGE XML object.
+
+1. Use the `rentrez` library `entrez_fetch()` function to get data from gene page in `xml` format.  
+1. Use `XML::xmlToList()` to coerce to list, then locate focal information in list
+1. Format biological data into table with information from UniProt
+
+
+
+Queries to the NCBI database fail completely sometimes for a reason I do not yet understand.  This workflow therefore works if the output from the first database (UniProt) is generated and save so that the whole process does not need to be repeated if the NCBI portion fails
+
+
+# Load packages
+
+```{r packages2}
+## Bioinformatics database APIs
+library(rentrez)
+library(UniprotR)
+library(Biostrings)
+
+# other
+library(XML)
+library(ggplot2)
+```
+
+## Global settings
+
+
+For testing code, set prototype to TRUE and the number of entries to query from database.
+```{r}
+prototype   <- FALSE
+prototype_N <- 40
+verbose     <- FALSE
+```
+
+
+# Load UniProt data
+
+The first part of this workflow gets biological information from the first database, UniProt, as well as the geneid, which serves as the accession number for the second database, NCBI gene.
+
+Load the data from UniProt
+```{r}
+df <- read.csv(file = "temp_uniprot_output.csv")
+```
+
+
+
+
+
+### Sample calls to the gene database
+
+The `rentrez::entrez_fetch()` function queries the database and `XML::xmlToList()` converts the output to an R list.
+
+
+Download gene page:
+```{r entrez_fetchtest1, eval = F}
+genedbase_test_XML  <- entrez_fetch(db = "gene", 
+                                    id =df$geneid[1], 
+                                    rettype = "xml",
+                                    parse = T)
+genedbase_test_LIST <- XML::xmlToList(genedbase_test_XML)
+```
+
+
+Get biological information:
+```{r entrez_fetchtest2, eval = F}
+#focal fields
+genedbase_test_LIST$Entrezgene$Entrezgene_properties[[2]][[3]]
+genedbase_test_LIST$Entrezgene$Entrezgene_gene$`Gene-ref`$`Gene-ref_maploc` 
+
+#other useful information
+genedbase_test_LIST$Entrezgene$Entrezgene_summary
+genedbase_test_LIST$Entrezgene$Entrezgene_type$.attrs 
+
+```
+
+### Set up dataframe
+
+
+Add columns for information I will be getting
+```{r}
+df$exons          <- NA
+df$chromosome_loc <- NA
+```
+
+
+### Test case
+```{r entrez_fetchtest3}
+i <- 1
+
+is.na(df$geneid[i])
+
+
+# get raw XML data
+## get NCBI gene page for gene ID
+cat("This is slow, \n")
+genedbase_test_XML <- entrez_fetch(db = "gene", 
+                                   id =df$geneid[i], 
+                                   rettype = "xml", 
+                                   parse = T)
+
+## convert gene page from XML to list
+cat("This is also slow \n")
+genedbase_test_LIST <-  XML::xmlToList(genedbase_test_XML)
+
+# get focal fields
+## exons
+exons_i <-  genedbase_test_LIST$Entrezgene$Entrezgene_properties[[2]][[3]]
+
+## chromosomal location
+chromosome_loc_i <-  genedbase_test_LIST$Entrezgene$Entrezgene_gene$`Gene-ref`$`Gene-ref_maploc` 
+
+# add to dataframe
+df$exons[1] <- exons_i
+df$chromosome_loc[1] <- chromosome_loc_i
+
+```
+
+
+### Get data with for() loop
+
+Loop over all accessions (gene IDs) and process data.
+
+This is slow.  Code is included in loop to run a limited number of iterations for prototyping.
+
+```{r forloop2}
+
+
+n_rows      <-  nrow(df)
+#verbose     <- TRUE
+#prototype   <- TRUE
+#prototype_N <- 2
+
+for(i in 1:n_rows){
+  
+  # progress report
+  if(verbose == TRUE){
+    print(i)
+  }
+  
+  # check - is there a geneid tow work with?
+  is_na <-  is.na(df$geneid[i])
+    if(is_na == TRUE){
+      # if no geneid, ship
+      next
+    }
+
+
+
+    # get raw XML data
+    ## get NCBI gene page for gene ID
+    # progress report
+    if(verbose == TRUE){
+      cat("Getting raw XML for row", i,"\n")
+    }
+    
+    genedbase_test_XML <-   tryCatch(expr = entrez_fetch(db = "gene", 
+                                                       id = df$geneid[i], 
+                                                       rettype = "xml",
+                                                       parse = T),
+                                   error = function(cond){
+                                     "error"
+                                   })
+    
+    # check if valid xml object was returned
+    what_returned <- is(genedbase_test_XML)[1]
+    if(what_returned != "XMLInternalDocument"){
+      next
+    }
+    
+    ## convert gene page to from XML to list
+    # progress report
+    if(verbose == TRUE){
+      cat("Processing raw XML for row", i)
+    }
+    
+    
+    genedbase_test_LIST <-  XML::xmlToList(genedbase_test_XML)
+    
+    # get focal fields
+    ## exons
+    exons_i <-  genedbase_test_LIST$Entrezgene$Entrezgene_properties[[2]][[3]]
+
+    ## chromosomal location
+    chromosome_loc_i <-  genedbase_test_LIST$Entrezgene$Entrezgene_gene$`Gene-ref`$`Gene-ref_maploc` 
+
+    # add data to dataframe
+    ## after checking if "null" was returned
+    
+    
+    if(is.null(exons_i) == FALSE){
+        df$exons[i] <- exons_i
+    }
+    
+    if(is.null(chromosome_loc_i) == FALSE){
+         df$chromosome_loc[i] <- chromosome_loc_i
+    }
+    
+    
+   
+
+  
+  if(prototype == TRUE & i == prototype_N){
+    break
+  }
+
+}
+```
+
+### Format data
+
+
+```{r}
+df$chromo     <- NA
+df$chromo_arm <- NA
+df$chromo_arm[grep("q",df$chromosome_loc)] <- "q"
+df$chromo_arm[grep("p",df$chromosome_loc)] <- "p"
+
+df$chromo  <- gsub("^([01-9]{1,2})([qp])(.*)","\\1",df$chromosome_loc)
+df$chromo  <- as.numeric(df$chromo )
+
+df$exons <- ifelse(df$exons == "NA", NA, df$exons )
+df$exons <- as.numeric(df$exons)
+```
+
+```{r}
+
+```
+
+### Examine output
+
+```{r}
+head(df)
+```
+
+
+### Graphically validate exon number data
+
+Plot the data to make sure there are no obviously unreasonable values
+
+```{r genegraph1}
+theme_set(theme_bw())
+ggplot(data = df,
+       aes(x = exons)) +
+  geom_histogram() +
+  xlab("Number of exons") +
+  ggtitle("Histogram of number of exons in student data") +
+  theme(plot.title = element_text(size=22, face = "bold"),
+        axis.title.x = element_text(size = 18, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text(size = 18, angle = 90, hjust = .5, vjust = .5, face = "bold"))
+```
+
+
+```{r genegraph2}
+ggplot(data = df,
+       aes(x = exons,
+           y = prot_length)) +
+          geom_point() + 
+          geom_smooth(method='lm') +
+  ggtitle("Scatterplot of number of exons of gene vs. protein length") +
+  xlab("Protein mass") +
+  ylab("Protein length") +
+  theme(plot.title = element_text(size=22, face = "bold"),
+        axis.title.x = element_text(size = 18, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text(size = 18, angle = 90, hjust = .5, vjust = .5, face = "bold"))
+```
+
+
+
+```{r genegraph3}
+theme_set(theme_bw())
+ggplot(data = df,
+       aes(x = chromo)) +
+  geom_histogram() +
+  xlab("Chromosome number") +
+  ggtitle("Histogram of Chromosome number in student data") +
+  theme(plot.title = element_text(size=22, face = "bold"),
+        axis.title.x = element_text(size = 18, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text(size = 18, angle = 90, hjust = .5, vjust = .5, face = "bold"))
+```
+
+
+
+
+### Save final output
+
+```{r}
+write.csv(df, file = "students_project_data.csv")
+```
+
+
+
+

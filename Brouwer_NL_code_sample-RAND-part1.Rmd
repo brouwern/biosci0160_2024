@@ -1,0 +1,425 @@
+---
+title: "Code Sample - Nathan Brouwer, Phd"
+output:
+  word_document: default
+  html_document: default
+date: "2024-01-22"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = FALSE)
+```
+
+# Accessing Bioinformatics Databases to Grade Student Homework Submission
+
+## Introduction to code sample
+
+For the last 4 year in my Computational Biology course students work on an unknown gene or mutation as part of an independent data analysis project.  This year, I am expanding and adapting this to my 260-person introductory biology course.  For these exercises, my intro bio students have been given the ID code (accession number) for a mutation, and from that code they will determine various related biological attributes, such as the gene the  mutation is in, what chromosome it is on, etc.  This script loads student submissions and accesses two online databases to collect the information necessary to check student submissions.
+
+This code will be shared with my undergraduate teaching assistants who have taken Computational Biology with me so they can see what I'm doing and help me with the assignments. The overall format of this code is similar to what I'd use in a class or share with collaborators who may need to use the code without my future input.
+
+Key approaches used in this script
+
+* Downloading data with an API
+* Processing XML-formatted data
+* Cleaning data with regular expressions
+* Plotting with `ggplot2`
+* Handling errors from database queries with `tryCatch`
+
+## Overview of data
+
+The data used in this script are on GitHub here: https://github.com/brouwern/biosci0160_2024
+
+For the first exercise students took a mutation ID number and located the gene it was contained in using a web-based program.  From the gene name, they can access information about the protein coded for by the gene, such as its 3-dimensional structure.  
+
+As part of assignment students turned in
+
+1. The name of a gene
+1. An accession number for protein coded for by this gene
+
+First, I want to check that the information that they submitted are valid gene names and accession numbers.  Second, I want to download information that will be used to check future assignments, such as the length of the gene and the size of the protein it codes for.
+
+Creating this workflow requires dealing with several issues
+
+1. I need to access 2 separate databases, each with a different API.  Luckily there are R packages for interfacing with both.
+1. The 2nd database uses a different accession numbering system than the 1st
+1. The 1st database returns tabular data, but the second database returns XML that needs to be parsed.
+
+The code below carries out the following steps:
+
+1. Loads and cleans data submitted by students
+1. Uses the accession number the students submitted to query a database to get some biological information, AND get an accession number for the 2nd database
+1. Queries the 2nd database with the necessary accession to get information I will have students locate on an upcoming assignment and cleans the XML output
+
+
+
+## Code sections
+
+* PART 1: PRELIMINARIES - Load and prep data
+* PART 2: DATA BASE 1 query and processing (UniProt)
+* PART 3: DATA BASE 2 query and processing (NCBI Gene)
+
+## Global settings
+
+
+For testing code, set prototype to TRUE and the number of entries to query from database.
+```{r}
+prototype   <- FALSE
+prototype_N <- 100
+verbose     <- FALSE
+```
+
+
+## PART 1: PRELIMINARIES
+
+This workflows requires several packages to interface with the APIs of the bioinformatics databases.
+
+### Download packages as needed
+
+Un-comment the code as needed to download the packages.
+
+NOTE: The `htmltools` package is used by `Biostrings` and was giving me some issues; I needed to re-install Rtools to get everything to work.
+
+```{r packages1}
+## CRAN bioinformatics packages
+#install.packages("rentrez")
+#install.packages("UniprotR")
+
+## BioConductor bioinformatics packages
+#install.packages("BiocManager")    
+#BiocManager::install("Biostrings")
+#BiocManager::install("GenomicAlignments")
+
+## BioConductor dependencies
+#install.packages("htmltools")
+
+## Other
+#install.packages(XML)
+```
+
+### Load packages
+
+```{r packages2}
+## Bioinformatics database APIs
+library(rentrez)
+library(UniprotR)
+library(Biostrings)
+
+# other
+library(XML)
+library(ggplot2)
+```
+
+
+
+### Load student-submitted data
+
+Students submitted data on a Google Doc, which was download and anonymized.
+
+The code below load data from students and does basic cleaning.
+
+```{r loaddata}
+# load data
+dat <- read.csv("introbio_unknowns_spr24 - gene_master_list.csv", 
+                skip = 1,
+                na.strings = c("NA", ""))
+
+# change blank space character . inserted by R to _
+names(dat) <- gsub("\\.", "_", names(dat))
+
+# shorten names from version given to students
+names(dat) <- gsub("AlphaFold_Accession_Number", "Access", names(dat))
+
+# remove NAs
+## **TODO** - create workflow to flag students who
+##        have not submitted work
+dat2 = dat[is.na(dat$Access) == FALSE, ]
+
+dim(dat2)
+```
+
+
+The key column of these data is "`Access`", which is the student-supplied accession number for a gene.  
+
+**TODO:**
+
+1. *Students may have submitted wrong accession number, so I need to cross check the gene name they submitted with the accession number.  Fuzzy matching would be useful to deal with typos.*
+
+```{r}
+head(dat2$Access,10)
+```
+
+
+
+## PART 2: DATA BASE 1 download and processing 
+
+The accession number submitted by students is a UniProt accession number.  The UniProt API can be easily accessed using the CRAN package `UniprotR`.
+
+The `UniprotR` package has the function `GetProteinAnnontate(`)`, which downloads fields from the database summary information.  Some sample calls:
+
+```{r UniprotRtest1, eval = F}
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "sequence")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "cc_tissue_specificity")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "go_c")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "go_f")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "cc_subcellular_location")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "xref_refseq")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "xref_geneid")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "organism_name")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "gene_primary")
+UniprotR::GetProteinAnnontate(dat2$Access[1] , "gene_names")
+```
+
+
+`UniprotR::GetProteinAnnontate()` can download a single column of data
+```{r UniprotRtest2, eval = F}
+UniprotR::GetProteinAnnontate(dat$Access[1] , "length")
+
+```
+
+...or multiple columns if supplied a vector of column names, which is what I'll do:
+```{r UniprotRtest3, eval = F}
+UniprotR::GetProteinAnnontate(dat$Access[1] , c("xref_geneid","length","mass"))
+```
+
+
+### Download focal columns from UniProt
+
+The focal columns I'll access from UniProt are:
+
+1. **xref_geneid**: cross-referenced accession number for database 2, NCBI gene database
+1. **length**: length of protein, in amino acids (aa)
+1. **mass**: mass of protein, in kilodaltons (kDa)
+
+#### Dataframe
+
+
+
+```{r unprotdf}
+# dataframe to hold output from UniProt
+df <- data.frame(# metadata
+                 ## student-supplied data
+                 "uniprot_access" = dat2$Access, # accession number recorded by student
+                 "uniprot_works" = "yes",        # changed to "no" if dbase query fails
+                 
+                # output from dbase query
+                "geneid" = NA,                  # NCBI geneid from UniProt (xref_geneid)
+                "gene_primary" = NA,
+                "gene_names" = NA,  # may be complex output
+                "organism_name" = NA,
+                #"protein_name" = NA, #long-form text
+                "prot_length" = NA,             # length of protein
+                "prot_mass" = NA)               # mass of protein
+
+# columns from database to extract    
+## columns names
+cols_get = c("xref_geneid",
+             "gene_primary",
+             "gene_names",
+             "organism_name",
+             #"protein_name",
+             "length",
+             "mass")
+
+## number of columns
+n_cols_get = length(cols_get)
+
+
+
+```
+
+
+#### Error handling
+
+Querying the database throws errors if
+
+* The student-supplied accession is run
+* The database is processing too many requests
+
+Errors caught using `tryCatch()`, which has a complex syntax.  I always refer to this [StackOverflow post](https://stackoverflow.com/questions/12193779/how-to-use-the-trycatch-function).
+
+
+Here are some sample calls to `tryCatch()`.  
+
+This accession works:
+```{r tryCatchcheck1}
+ # valid call
+access_i <- tryCatch(expr = UniprotR::GetProteinAnnontate(dat2$Access[18] , cols_get),
+                       error = function(cond){
+                                   rep("error",n_cols_get)}
+                       )
+```
+
+This accession throws an error.  When an error is thrown, a vector containing "error" is returned to fill in the dataframe instead of the desired data.
+```{r tryCatchcheck2}
+#bad call
+access_i <- tryCatch(expr = UniprotR::GetProteinAnnontate(dat2$Access[19] , cols_get),
+                       error = function(cond){
+                                   rep("error",n_cols_get)}
+                       )
+```
+
+
+**TODO**: Troubleshoot error handing
+
+* different types of errors being thrown - could log which ones for follow up
+* for loop existed early at for some reason - not sure why; may be resolved
+
+**Types of errors:**
+
+* "Internet connection problem occurs and the function will return the original error"
+* "Bad request. The resource you requested doesn't exist or There is a problem with your input."
+* "Internal server error.  Most likely a temporary problem, but if the problem persists please contact us."
+
+#### Get UniProt data
+
+This `for()` loop requests the data for each student-supplied accession number.
+
+The code will throw a warning if the loop appears to have exited early.
+
+**TODO**: Wrap this into a function that allows flexibility in e.g. which columns to get
+
+```{r forloop1}
+# number of proteins to loop over
+n_rows        <- length(dat2$Access)
+#verbose      <- TRUE
+#prototype    <- TRUE
+#prototype_N  <- 5
+
+for(i in 1:n_rows){
+  
+  if(verbose == TRUE){
+    print(i)
+  }
+  
+  
+  # query dbase
+  ## use tryCatch() to skip over errors
+  access_i <- tryCatch(expr = UniprotR::GetProteinAnnontate(dat2$Access[i] , cols_get),
+                       error = function(cond){
+                         rep("error",n_cols_get)}
+                       )
+  # store information
+  df[i, -c(1,2)] <- access_i
+  
+  if(prototype == TRUE & i == prototype_N){
+    break
+  }
+}
+
+# flag in case for() loop exits early
+if(i < n_rows){
+  warning(paste("Only", i, "of",n_rows,"irrerations run."))
+}
+```
+
+
+#### Annotate output from UniProt
+
+Annotate output, e.g. did tryCatch throw an error, or even if error is thrown was there no geneid? 
+```{r annotateuniprot}
+df$uniprot_works <-  ifelse(df$geneid == "error","NO","yes" )
+df$uniprot_works <-  as.factor(df$uniprot_works)
+df$no_geneid     <-  ifelse(df$geneid  == "NA","*","")
+df$no_geneid     <-  as.factor(df$no_geneid )
+
+message("NOTE: NO on these tables indicate how many times requests to the database had issues")
+summary(df$uniprot_works)
+summary(df$no_geneid)
+
+```
+
+
+
+####  Clean output from UniProt
+
+Clean output and format relevant things as numbers rather than text.
+
+```{r}
+#- remove ";" from geneid column
+df$geneid       <- gsub(";","",df$geneid)
+
+# shorten species names
+df$organism_name[grep("Homo",  df$organism_name )]          <- "human"
+df$organism_name[grep("Equus ",  df$organism_name )]        <- "horse"
+df$organism_name[grep("^Mus  ",  df$organism_name )]        <- "mouse"
+df$organism_name[grep("^Drosophila",  df$organism_name )] <- "fruit_fly"
+df$organism_name[grep("Ramphastos",  df$organism_name )]  <- "toucan"
+
+# format text as numbers as needed
+## length
+df$prot_length  <- ifelse(df$prot_length == "NA", NA, df$prot_length)
+df$prot_length  <- as.numeric(df$prot_length)
+
+#mass
+df$prot_mass    <- ifelse(df$prot_mass == "NA", NA, df$prot_mass)
+df$prot_mass    <- as.numeric(df$prot_mass)
+```
+
+
+Save output
+
+```{r}
+write.csv(df, file = "temp_uniprot_output.csv")
+```
+
+
+#### Sample Output from UniProt
+
+```{r}
+head(df,10)
+```
+
+
+
+### Graphically validate length and mass data
+
+Plot the data to make sure there are no obviously unreasonable values
+
+```{r uniprotgraph1}
+theme_set(theme_bw())
+ggplot(data = df,
+       aes(x = prot_length)) +
+  geom_histogram() +
+  xlab("Protein length (amino acids)") +
+  ggtitle("Histogram of length of proteins in student data") +
+  theme(plot.title = element_text(size=22, face = "bold"),
+        axis.title.x = element_text(size = 18, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text(size = 18, angle = 90, hjust = .5, vjust = .5, face = "bold"))
+```
+
+
+```{r uniprotgraph2}
+theme_set(theme_bw())
+ggplot(data = df,
+       aes(x = prot_length)) +
+  geom_histogram() +
+  xlab("Protein  mass (kilodaltons; kDa)") +
+  ggtitle("Histogram of mass of proteins in student data") +
+  theme(plot.title = element_text(size=22, face = "bold"),
+        axis.title.x = element_text(size = 18, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text(size = 18, angle = 90, hjust = .5, vjust = .5, face = "bold"))
+```
+
+
+```{r uniprotgraph3}
+ggplot(data = df,
+       aes(x = prot_mass,
+           y = prot_length)) +
+          geom_point() + 
+          geom_smooth(method='lm') +
+  ggtitle("Scatterplot of mass of proteins vsersus length") +
+  xlab("Protein mass") +
+  ylab("Protein length") +
+  theme(plot.title = element_text(size=22, face = "bold"),
+        axis.title.x = element_text(size = 18, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text(size = 18, angle = 90, hjust = .5, vjust = .5, face = "bold"))
+```
+
+
+
+
+
